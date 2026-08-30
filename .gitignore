@@ -1,0 +1,12 @@
+# 依存
+node_modules/
+
+# ループの生成物・作業ファイル
+.loop-tmp/
+output/
+runs/
+logs/
+
+# OS / エディタ
+.DS_Store
+*.log

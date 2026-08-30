@@ -1,0 +1,15 @@
+{
+  "name": "multi-agent-dev-review",
+  "version": "1.0.0",
+  "description": "Developer Agent と Reviewer Agent（別モデル）が交互にやり取りし、レビュー承認まで自動でコードを改善していく最小プロトタイプ。",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
+    "@anthropic-ai/sdk": "^0.122.0"
+  },
+  "license": "ISC"
+}
