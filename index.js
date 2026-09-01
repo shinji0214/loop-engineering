@@ -69,6 +69,9 @@ const TOKEN_BUDGET = numFromEnv("TOKEN_BUDGET", 100_000);
 const TOKENS_PER_MINUTE = numFromEnv("TOKENS_PER_MINUTE", 40_000);
 // 1回の生成のコスト上限(USD)。sdk モードのみ有効（SDK の maxBudgetUsd に渡す）。0 で無効。
 const MAX_BUDGET_USD = numFromEnv("MAX_BUDGET_USD", 0);
+// sdk モードの1呼び出しあたりの最大ターン数。ツールは無効化しているが、
+// 大きな入力・思考でターンを消費することがあるため余裕を持たせる。
+const SDK_MAX_TURNS = numFromEnv("SDK_MAX_TURNS", 12);
 // -------------------------------------------------------------------------
 
 // VERBOSE=1 で Developer の生成コードを毎ラウンド全文表示。
@@ -339,7 +342,7 @@ async function generateViaSdk(system, messages, model) {
       allowedTools: [],
       disallowedTools: DISABLED_TOOLS,
       settingSources: [], // ~/.claude や プロジェクトの .claude を読み込まない（決定性のため）
-      maxTurns: 2,
+      maxTurns: SDK_MAX_TURNS,
       ...(MAX_BUDGET_USD ? { maxBudgetUsd: MAX_BUDGET_USD } : {}),
       stderr: () => {},
     },
