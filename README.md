@@ -63,6 +63,17 @@ Reviewerが「APPROVE」を出すか最大5ラウンドに達するまで繰り�
 
 スナップショット/サマリは `SNAPSHOTS=0` で無効化できます。
 
+### 既存コードの入力（`FROM_DIR`）
+
+```bash
+$env:FROM_DIR = "output\2026-09-01T..."; node index.js "既存プロジェクトへの改修内容"; Remove-Item Env:FROM_DIR
+```
+
+`FROM_DIR` に既存のファイルツリーを指定すると、それを `currentFiles` の初期値として読み込み、
+ゼロから作るのではなく**既存コードの改修**として動く（1ラウンド目から「変更するファイルだけ出力」）。
+`node_modules` / `.git` / `output` / `runs` / `logs` / `.loop-tmp` / ドットファイルは自動で除外するので、
+プロジェクトルート（`.`）を指しても安全。自己編集・リファクタタスクに使う。
+
 ### 成果物（複数ファイル対応）
 
 Developer は複数ファイルを出力できます（コードブロックの言語指定の位置に
@@ -125,6 +136,7 @@ Reviewer には元のタスク文（要件）も渡されるので、「バグ�
 | `TEST_TIMEOUT_MS` | `30000` | `node --test` のタイムアウト |
 | `TEST_FAIL_MODE` | `reject` | `reject`=テスト失敗で即REJECT / `review`=Code Reviewer に渡す |
 | `TEST_WRITER_MODEL` / `TEST_REVIEWER_MODEL` | `claude-sonnet-5` | 各エージェントのモデル |
+| `FROM_DIR` | （空）| 既存ファイルツリーを読み込んで改修対象にする（未指定ならゼロから新規作成）|
 
 ```bash
 TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "タスク"

@@ -96,6 +96,12 @@ const TEST_FAIL_MODE = (process.env.TEST_FAIL_MODE || "reject").toLowerCase();
 const TEST_WRITER_MODEL = process.env.TEST_WRITER_MODEL || "claude-sonnet-5";
 const TEST_REVIEWER_MODEL = process.env.TEST_REVIEWER_MODEL || "claude-sonnet-5";
 
+// FROM_DIR=<path> で既存のファイルツリーを読み込み、currentFiles の初期値にする
+// （＝ゼロから作らせるのではなく既存コードの改修・自己編集実験に使う）。
+const FROM_DIR = process.env.FROM_DIR || "";
+// FROM_DIR がプロジェクトルート等を指しても安全なよう、走査から除外する名前
+const FROM_DIR_EXCLUDE = new Set(["node_modules", ".git", "output", "runs", "logs", ".loop-tmp"]);
+
 const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
 与えられた要件を満たすコードを、動作する形で出力してください。
 レビュー指摘を受け取った場合は、指摘内容を反映して修正版を出力してください。
@@ -111,9 +117,11 @@ const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
   ...ファイルの内容...
   \`\`\`
 - 1ファイルで足りる場合もパスを必ず付ける（例: \`\`\`solution.js）。
-- 初回は必要なファイルをすべて出力する。
-- 2回目以降（修正時）は、**変更するファイルだけ**を出力する。触らないファイルは出さない。
-  出さなかったファイルは前回のまま保持される。
+- 「現在のプロジェクト」としてファイルが提示されている場合（既存コードの改修）は、
+  **変更するファイルだけ**を出力する。触らないファイルは出さない。
+  出さなかったファイルは既存のまま保持される。
+- 何も提示されていない新規タスクの場合は、必要なファイルをすべて出力する。
+  2回目以降（修正時）は、同様に変更するファイルだけを出力する。
 - ファイルを削除したい場合は、言語指定を delete としたブロックにパスを1行ずつ書く:
   \`\`\`delete
   src/old.js
@@ -599,6 +607,34 @@ function writeFileTree(dir, files) {
   return dir;
 }
 
+/**
+ * dir 以下を再帰的に読み込み、相対パス -> 内容 の Map を返す（既存コード入力用）。
+ * FROM_DIR_EXCLUDE に載っている名前・ドットファイル/ディレクトリはスキップする。
+ * バイナリ疑いのファイル（NUL バイトを含む）はスキップする。
+ * @param {string} dir
+ * @returns {Map<string,string>}
+ */
+function readFileTree(dir) {
+  const out = new Map();
+  if (!fs.existsSync(dir)) return out;
+  const root = path.resolve(dir);
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (e.name.startsWith(".") || FROM_DIR_EXCLUDE.has(e.name)) continue;
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      const rel = path.relative(root, full).replace(/\\/g, "/");
+      const buf = fs.readFileSync(full);
+      if (buf.includes(0)) continue; // バイナリらしきものは無視
+      out.set(rel, buf.toString("utf-8"));
+    }
+  })(root);
+  return out;
+}
+
 /** Map<path,content> を {path,content}[] に。 */
 function filesFromMap(fileMap) {
   return [...fileMap.entries()].map(([p, content]) => ({ path: p, content }));
@@ -920,10 +956,17 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   const rounds = []; // SUMMARY.md 用の遷移記録
   const runsSessionDir = path.join(RUNS_DIR, sessionId);
 
+  // FROM_DIR があれば既存ファイルを currentFiles の初期値にする（既存コードの改修・自己編集用）
+  if (FROM_DIR) {
+    for (const [p, c] of readFileTree(FROM_DIR)) currentFiles.set(p, c);
+    console.log(`[From] ${FROM_DIR} から ${currentFiles.size} 個のファイルを読み込みました`);
+  }
+
   console.log(
     `[Config] provider=${PROVIDER} models=${modelAlias(DEVELOPER_MODEL)}/${modelAlias(REVIEWER_MODEL)} ` +
       `max_rounds=${maxRounds} token_budget=${TOKEN_BUDGET || "無制限"} ` +
       `rate=${TOKENS_PER_MINUTE || "無制限"}/分 checks=${CHECKS ? "on" : "off"} tests=${TESTS ? "on" : "off"}` +
+      (FROM_DIR ? ` from=${FROM_DIR}` : "") +
       (PROVIDER === "api" ? ` max_output_tokens=${MAX_OUTPUT_TOKENS}` : "") +
       (PROVIDER === "sdk" && MAX_BUDGET_USD ? ` max_budget_usd=${MAX_BUDGET_USD}` : "")
   );
@@ -958,9 +1001,14 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   const devHistory = [
     {
       role: "user",
-      content: frozenTests.size
-        ? `${task}\n\n# 与えられた受け入れテスト（test/ 配下・変更禁止・全て通すこと）\n${renderFiles(frozenTests)}`
-        : task,
+      content:
+        task +
+        (currentFiles.size
+          ? `\n\n# 現在のプロジェクト（既存コード。変更するファイルだけ出力すること）\n${renderFiles(currentFiles)}`
+          : "") +
+        (frozenTests.size
+          ? `\n\n# 与えられた受け入れテスト（test/ 配下・変更禁止・全て通すこと）\n${renderFiles(frozenTests)}`
+          : ""),
     },
   ];
 
