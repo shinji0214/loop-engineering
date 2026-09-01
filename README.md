@@ -160,13 +160,27 @@ TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "�
 >   `claude-sonnet-5`。opus の枠に余裕があれば `REVIEWER_MODEL=claude-opus-5` に
 >   戻すと自己採点の甘さを避けやすい。
 
-`index.js` は `runLoop()` を `export` しているので、STEP 3では
-Expressなどからそのまま `import { runLoop } from "./index.js"` して
-呼び出せます。
+## コード構成
+
+ロジックは `src/` に分割。`index.js` は薄いエントリ＋公開APIの再export（`runLoop` /
+`parseFiles` / `runChecks` / `runTests` / `establishTests`）。STEP 3では
+`import { runLoop } from "./index.js"` でそのまま呼べる。
+
+| ファイル | 役割 |
+|---|---|
+| `src/config.js` | 環境変数から読む設定値 |
+| `src/prompts.js` | 各エージェントの system prompt |
+| `src/meter.js` | `TokenMeter`（予算 / レート制限） |
+| `src/providers.js` | sdk / cli / api のモデル呼び出し + `callAgent` |
+| `src/files.js` | コードブロックのパース / 累積マージ / 読み書き |
+| `src/checks.js` | フェーズ1: 決定的チェック |
+| `src/tests.js` | フェーズ2-3: 受け入れテスト |
+| `src/summary.js` | 遷移サマリ SUMMARY.md 生成 |
+| `src/loop.js` | `runLoop`（オーケストレーション） |
 
 ## 自己改修実験（experiments/）
 
-このループに**自分自身（`index.js`）の改修**をさせ、世代を重ねて品質が保てるか観測する実験。
+このループに**自分自身（`src/` のモジュール）の改修**をさせ、世代を重ねて品質が保てるか観測する実験。
 
 ```bash
 node experiments/selfimprove.mjs --generations=1
@@ -174,7 +188,7 @@ node experiments/selfimprove.mjs --generations=1
 
 1世代 =
 1. `experiments/BACKLOG.md` の先頭の未完（`- [ ]`）項目を取る
-2. その世代の `index.js` に `FROM_DIR` で渡し、`TESTS=1` で改修させる
+2. その世代の `index.js` + `src/` を `FROM_DIR` で渡し、`TESTS=1` で改修させる
 3. 成果物＋生成された受け入れテストを `gens/gen-<N+1>/` に組み立て、テストを
    `test/generations/gen-NNN/` に昇格
 4. `gens/gen-<N+1>/test/run.mjs`（凍結オラクル）を実行
@@ -184,11 +198,10 @@ node experiments/selfimprove.mjs --generations=1
 `gens/` は `.gitignore` 済み（作業データ）。採用世代を本体に反映するかは人間が判断する。
 凍結オラクル `test/` は**手書き固定**で、これが外部の歯止め（[test/README.md](./test/README.md)）。
 
-> **コスト注意**: 1世代 ≒ 200〜400k トークン（Test Writer/Reviewer + Developer×3 +
-> Code Reviewer + オラクル）。FROM_DIR は `index.js` だけに絞って（`test/mocks` 等は
-> ドライバが直接コピーで引き継ぐ）入力を圧縮しているが、Developer が毎ラウンド
-> `index.js` 全体（~1300行）を再出力するのが主コスト。`MAX_ROUNDS=3` /
-> `TOKEN_BUDGET=300000` が既定（環境変数で調整可）。Pro プランでは数世代で週次枠を圧迫する。
+> **コスト注意**: 1世代 ≒ 数十〜数百k トークン。`FROM_DIR` は `index.js` + `src/` に絞り
+> （`test/` はドライバが直接コピーで引き継ぐ）、Developer は**変更したモジュールだけ**
+> 再出力するので、モジュール分割前より大幅に軽い。`MAX_ROUNDS=3` /
+> `TOKEN_BUDGET=300000` が既定（環境変数で調整可）。
 
 ## 次にやること
 

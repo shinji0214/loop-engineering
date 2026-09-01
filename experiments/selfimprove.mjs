@@ -26,9 +26,11 @@ const LOG = path.join(GENS, "LOG.md");
 
 // 世代スナップショットに含めるトップレベル項目（生成物・足場は除外）
 const SNAPSHOT_INCLUDE = [
-  "index.js", "AGENTS.md", "README.md", "STEPS.md",
+  "index.js", "src", "AGENTS.md", "README.md", "STEPS.md",
   "package.json", "package-lock.json", "test",
 ];
+// FROM_DIR で渡す（＝エージェントが見る）のはこれだけ。全部渡すと入力が破綻する。
+const SEED_INCLUDE = ["index.js", "src", "package.json"];
 
 const args = process.argv.slice(2);
 const maxGens = Number((args.find((a) => a.startsWith("--generations=")) || "").split("=")[1] || 1);
@@ -101,11 +103,13 @@ const TASK_GUIDANCE = `
 
 ---
 【自己改修タスクの指示】
-- これはこのループ本体（プロジェクトルートの index.js）の改修。FROM_DIR で現在の全ソースが渡されている。
-- 変更してよいのは index.js だけ。test/ 配下は凍結・変更禁止。
+- これはこのループ本体の改修。ロジックは src/ に分割されている（config/prompts/meter/
+  providers/files/checks/tests/summary/loop）。index.js は薄いエントリ＋公開APIの再export。
+- 変更してよいのは src/ 配下と index.js のみ。test/ 配下は凍結・変更禁止。
 - 受け入れテストは test/acceptance.test.js に置くこと。
-- 検証対象の関数が index.js から export されていなければ export を付け、
-  \`import { <関数名> } from '../index.js'\` の形で import してテストする。
+- 検証対象の関数が index.js から export されていなければ、src/ の該当モジュールに export を付け、
+  index.js にも \`export { <関数名> } from "./src/<module>.js";\` の再export 行を足す。
+  テストは \`import { <関数名> } from '../index.js'\` の形で読む。
 - 既存の \`node test/run.mjs\` が通る状態を保つこと。`;
 
 // --- 1世代 --------------------------------------------------------------
@@ -122,14 +126,17 @@ function runGeneration(n) {
 
   const artifactRoot = fs.mkdtempSync(path.join(GENS, `run-${n}-`));
 
-  // FROM_DIR は index.js（+package.json）だけに絞る。
-  // 全16ファイルを毎エージェント呼び出しに乗せるとトークンが破綻するため。
+  // FROM_DIR は index.js + src/ + package.json だけに絞る（test/ 等は乗せない）。
+  // 全ファイルを毎エージェント呼び出しに乗せるとトークンが破綻するため。
   // test/mocks 等は gen-<N> から直接コピーで引き継ぐ（下の組み立てステップ）。
   const seedDir = path.join(artifactRoot, "seed");
   fs.mkdirSync(seedDir, { recursive: true });
-  for (const f of ["index.js", "package.json"]) {
-    const s = path.join(base, f);
-    if (fs.existsSync(s)) fs.copyFileSync(s, path.join(seedDir, f));
+  for (const it of SEED_INCLUDE) {
+    const s = path.join(base, it);
+    if (!fs.existsSync(s)) continue;
+    const d = path.join(seedDir, it);
+    if (fs.statSync(s).isDirectory()) copyTree(s, d);
+    else fs.copyFileSync(s, d);
   }
 
   const env = {
