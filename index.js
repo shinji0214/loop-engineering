@@ -79,6 +79,12 @@ const VERBOSE = /^(1|true|yes|on)$/i.test(process.env.VERBOSE || "");
 // runs/<セッションID>/round-N/ に保存し、finish で SUMMARY.md を生成）。
 const SNAPSHOTS = !/^(0|false|no|off)$/i.test(process.env.SNAPSHOTS ?? "");
 
+// CHECKS=0 で無効化。既定は ON（STEP 4 フェーズ1）。
+// 毎ラウンド、生成物を子プロセスで構文チェック＋import 読み込みし、
+// 失敗したら Reviewer を呼ばず即 REJECT（決定的ゲート）。
+const CHECKS = !/^(0|false|no|off)$/i.test(process.env.CHECKS ?? "");
+const CHECK_TIMEOUT_MS = numFromEnv("CHECK_TIMEOUT_MS", 15_000);
+
 const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
 与えられた要件を満たすコードを、動作する形で出力してください。
 レビュー指摘を受け取った場合は、指摘内容を反映して修正版を出力してください。
@@ -256,8 +262,19 @@ async function generateViaSdk(system, messages, model) {
   });
 
   let result;
-  for await (const m of iter) {
-    if (m.type === "result") result = m;
+  try {
+    for await (const m of iter) {
+      if (m.type === "result") result = m;
+    }
+  } catch (e) {
+    const msg = String(e?.message || e).split("\n")[0];
+    if (/authenticate|oauth|session expired|not logged in|login/i.test(msg)) {
+      throw new Error(
+        "Agent SDK 認証エラー: `claude` のログインが切れています。" +
+          "ターミナルで `claude` を一度起動して再ログインしてください（または LOOP_PROVIDER=api）。"
+      );
+    }
+    throw new Error(`Agent SDK 実行エラー: ${msg.slice(0, 300)}`);
   }
   if (!result) throw new Error("Agent SDK: result メッセージが得られませんでした");
   if (result.subtype !== "success") {
@@ -518,6 +535,116 @@ function filesFromMap(fileMap) {
   return [...fileMap.entries()].map(([p, content]) => ({ path: p, content }));
 }
 
+// --- STEP 4 フェーズ1: 決定的チェック（構文＋読み込み） ---------------------
+
+// チェック用ディレクトリに配置して子プロセスで実行するドライバ。
+// 各ファイルを: .json は JSON.parse、.js/.mjs/.cjs は動的 import で読み込み確認。
+// import はモジュール本体を実行するので、CLI エントリ等が process.exit を
+// 呼んでもドライバが死なないよう exit を無効化する。
+// 「読み込みエラー」（構文・モジュール解決・ESM/CJS 不整合）だけを問題として報告し、
+// アプリ的な実行時例外は フェーズ1 では無視する（テスト実行は フェーズ3）。
+const CHECK_DRIVER = `
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const root = process.argv[2];
+const absRoot = path.resolve(root);
+const files = [];
+(function walk(d) {
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name === "_loopcheck.mjs" || e.name.startsWith(".")) continue;
+    const p = path.join(d, e.name);
+    e.isDirectory() ? walk(p) : files.push(p);
+  }
+})(root);
+
+const rel = (p) => path.relative(root, p).replace(/\\\\/g, "/");
+const scrub = (s) => String(s).split("\\n")[0].split(absRoot).join("").split(absRoot.replace(/\\\\/g, "/")).join("").replace(/\\\\/g, "/").replace(/^[\\/]+/, "");
+const problems = [];
+const add = (m) => { if (!problems.includes(m)) problems.push(m); };
+
+const LOAD_ERR = /Cannot use import statement|require is not defined|exports is not defined|module is not defined|__dirname is not defined|__filename is not defined|Unexpected (token|identifier|end of)|ERR_MODULE_NOT_FOUND|ERR_REQUIRE_ESM|ERR_UNSUPPORTED_DIR_IMPORT|ERR_PACKAGE_PATH_NOT_EXPORTED|ERR_UNSUPPORTED_ESM_URL_SCHEME/;
+
+process.exit = () => {}; // import 時に走る CLI エントリの exit を無効化
+
+for (const f of files) {
+  const ext = path.extname(f);
+  const r = rel(f);
+  if (ext === ".json") {
+    try { JSON.parse(fs.readFileSync(f, "utf8")); }
+    catch (e) { add(r + ": 不正なJSON — " + e.message); }
+    continue;
+  }
+  if (![".js", ".mjs", ".cjs"].includes(ext)) continue;
+  try {
+    await import(pathToFileURL(f).href + "?t=" + Date.now());
+  } catch (e) {
+    const tag = (e && (e.name + " " + (e.code || "") + " " + e.message)) || String(e);
+    if (e instanceof SyntaxError || LOAD_ERR.test(tag)) {
+      add(r + ": 読み込み失敗 — " + scrub(e.message || tag));
+    }
+  }
+}
+
+console.log("__LOOPCHECK__" + JSON.stringify(problems));
+`;
+
+/**
+ * 累積ファイルを一時ディレクトリに書き出し、子プロセスで構文＋読み込みチェック。
+ * @returns {Promise<{ok: boolean, problems: string[]}>}
+ */
+export async function runChecks(sessionId, roundNum, fileMap) {
+  const base = path.join(TMP_DIR, `checks-${sessionId}`);
+  const dir = path.join(base, `round-${roundNum}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  writeFileTree(dir, filesFromMap(fileMap));
+  fs.writeFileSync(path.join(dir, "_loopcheck.mjs"), CHECK_DRIVER, "utf-8");
+
+  const res = await new Promise((resolve) => {
+    const child = spawn(process.execPath, ["_loopcheck.mjs", "."], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: CHECK_TIMEOUT_MS,
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => resolve({ err: `spawn error: ${e.message}` }));
+    child.on("close", (codeExit, signal) => resolve({ out, err, codeExit, signal }));
+  });
+
+  try {
+    fs.rmSync(base, { recursive: true, force: true });
+  } catch {
+    /* noop */
+  }
+
+  if (res.signal) {
+    return {
+      ok: false,
+      problems: [
+        `チェックが ${Math.round(CHECK_TIMEOUT_MS / 1000)} 秒でタイムアウト（無限ループ / 未解決の top-level await の可能性）`,
+      ],
+    };
+  }
+  const marker = (res.out || "").split("\n").find((l) => l.startsWith("__LOOPCHECK__"));
+  if (marker) {
+    try {
+      const problems = JSON.parse(marker.slice("__LOOPCHECK__".length));
+      return { ok: problems.length === 0, problems };
+    } catch {
+      /* fall through */
+    }
+  }
+  // マーカーが無い＝ドライバ自体が異常終了
+  return {
+    ok: false,
+    problems: [`チェック実行に失敗: ${(res.err || res.out || "unknown").slice(0, 400)}`],
+  };
+}
+
 /**
  * 遷移サマリ Markdown を組み立てる。
  * @param {{
@@ -609,7 +736,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   console.log(
     `[Config] provider=${PROVIDER} models=${modelAlias(DEVELOPER_MODEL)}/${modelAlias(REVIEWER_MODEL)} ` +
       `max_rounds=${maxRounds} token_budget=${TOKEN_BUDGET || "無制限"} ` +
-      `rate=${TOKENS_PER_MINUTE || "無制限"}/分` +
+      `rate=${TOKENS_PER_MINUTE || "無制限"}/分 checks=${CHECKS ? "on" : "off"}` +
       (PROVIDER === "api" ? ` max_output_tokens=${MAX_OUTPUT_TOKENS}` : "") +
       (PROVIDER === "sdk" && MAX_BUDGET_USD ? ` max_budget_usd=${MAX_BUDGET_USD}` : "")
   );
@@ -704,6 +831,54 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
 
     if (reportBudget(meter)) return finish("budget_exceeded");
 
+    /** REJECT時、次ラウンドの Developer 入力を積む。 */
+    const pushRejectFeedback = (reviewText, opts = {}) => {
+      devHistory.push({
+        role: "user",
+        content:
+          `${opts.label || "レビュー結果"}:\n${reviewText}\n\n` +
+          `現在のプロジェクト全ファイル:\n${renderFiles(currentFiles)}\n\n` +
+          (opts.instruction ||
+            `REJECT の根拠になった項目を最優先で修正し、**変更するファイルだけ**出力してください。` +
+              `「改善提案（対応任意）」は、コストが小さく明らかに有益なものだけ取り込めば十分です。`),
+      });
+    };
+
+    // --- 決定的チェック（フェーズ1）: 失敗なら Reviewer を呼ばず即 REJECT ---
+    if (CHECKS && currentFiles.size) {
+      const { ok, problems } = await runChecks(sessionId, roundNum, currentFiles);
+      if (!ok) {
+        const autoReview =
+          "REJECT\n決定的チェック（構文・読み込み）で失敗:\n" +
+          problems.map((p) => `- ${p}`).join("\n");
+        console.log(`[Checks] NG\n${problems.map((p) => `  - ${p}`).join("\n")}\n`);
+        lastReview = autoReview;
+        rounds.push({ round: roundNum, verdict: "REJECT", changed, deleted, review: autoReview });
+        saveLog(sessionId, {
+          round: roundNum,
+          developer_output: code,
+          changed_files: changed,
+          deleted_files: deleted,
+          checks: problems,
+          reviewer_output: autoReview,
+          verdict: "REJECT",
+          usage: meter.summary(),
+        });
+        console.log(
+          `[Usage] 累計 ${meter.total} トークン（入力 ${meter.totalInput} / 出力 ${meter.totalOutput}）`
+        );
+        if (reportBudget(meter)) return finish("budget_exceeded");
+        pushRejectFeedback(autoReview, {
+          label: "自動チェック結果",
+          instruction:
+            "まず全ファイルがエラーなく読み込める状態にしてください（構文エラー・" +
+            "モジュール解決エラー・ESM/CommonJS の不整合など）。**変更するファイルだけ**出力してください。",
+        });
+        continue; // Reviewer を呼ばず次ラウンドへ
+      }
+      console.log(`[Checks] OK`);
+    }
+
     // Reviewer には累積したプロジェクト全体を見せる（差分だけ見せない）
     const projectView = currentFiles.size ? renderFiles(currentFiles) : code;
     const review = await callAgent(
@@ -743,14 +918,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
 
     if (reportBudget(meter)) return finish("budget_exceeded");
 
-    devHistory.push({
-      role: "user",
-      content:
-        `レビュー結果:\n${review}\n\n` +
-        `現在のプロジェクト全ファイル:\n${renderFiles(currentFiles)}\n\n` +
-        `REJECT の根拠になった項目を最優先で修正し、**変更するファイルだけ**出力してください。` +
-        `「改善提案（対応任意）」は、コストが小さく明らかに有益なものだけ取り込めば十分です。`,
-    });
+    pushRejectFeedback(review);
   }
 
   console.log(`=== 最大ラウンド（${maxRounds}）に到達したため停止 ===`);
@@ -814,5 +982,8 @@ async function main() {
 // (STEP 3でExpressから import して使う際に自動実行されないようにするため)
 // Windows でも動くよう pathToFileURL で比較する
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
+  main().catch((e) => {
+    console.error(`\n[Error] ${e?.message || e}`);
+    process.exit(1);
+  });
 }

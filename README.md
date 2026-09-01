@@ -79,6 +79,17 @@ Developer は複数ファイルを出力できます（コードブロックの�
 Reviewer には元のタスク文（要件）も渡されるので、「バグは無いが要件未達」
 も判定できます。
 
+### 決定的チェック（STEP 4 フェーズ1）
+
+毎ラウンド、Developer の出力を子プロセスで機械チェックします:
+
+- `.json` は `JSON.parse`、`.js` / `.mjs` / `.cjs` は動的 `import` で**読み込み確認**
+- 構文エラー / モジュール解決エラー / **ESM・CommonJS の不整合** を検出
+- 失敗したら **Reviewer を呼ばずに即 REJECT**（トークン節約）、エラー全文を次ラウンドの Developer に渡す
+- アプリ的な実行時例外はフェーズ1では無視（テスト実行はフェーズ3で）
+
+`CHECKS=0` で無効化。
+
 ### トークンの安全弁（環境変数で調整）
 
 | 変数 | 既定値 | 意味 |
@@ -93,6 +104,8 @@ Reviewer には元のタスク文（要件）も渡されるので、「バグ�
 | `CLAUDE_CLI_PATH` | `claude` | `cli` モードで使う実行ファイル |
 | `VERBOSE` | `0` | `1` で Developer の生成コードを毎ラウンド全文表示。既定はファイル名＋行数のみ（全文は `output/` と `logs/`）|
 | `SNAPSHOTS` | `1` | `0` で `runs/<セッションID>/`（ラウンドごとのスナップショット＋`SUMMARY.md`）を作らない |
+| `CHECKS` | `1` | `0` で決定的チェック（構文・読み込み）を無効化 |
+| `CHECK_TIMEOUT_MS` | `15000` | チェック子プロセスのタイムアウト |
 
 ```bash
 TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "タスク"

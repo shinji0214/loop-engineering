@@ -59,9 +59,19 @@
   （該当ファイル・箇所・理由）。判定は保留しない。
   ```
 
+## 決定的チェック（STEP 4 フェーズ1）
+
+Reviewer を呼ぶ前に、毎ラウンド機械チェックを通す:
+
+- `.json` → `JSON.parse` / `.js`/`.mjs`/`.cjs` → 子プロセスで動的 `import`（読み込み確認）
+- 構文エラー・モジュール解決エラー・ESM/CommonJS 不整合を検出
+- **失敗 → Reviewer を呼ばず即 REJECT**（`verdict: REJECT`、`checks` にエラー列挙）。エラー全文を次ラウンドの Developer へ
+- アプリ的な実行時例外は無視（挙動の検証は フェーズ3 のテスト実行で）
+- `CHECKS=0` で無効
+
 ## 完了基準（Acceptance Criteria）
 
-- Reviewer Agentの応答が `APPROVE` で始まる場合のみ「合格」とみなす
+- 決定的チェックを通過し、**かつ** Reviewer Agent の応答が `APPROVE` で始まる場合のみ「合格」
   （APPROVE の後に「改善提案（対応任意）」が続いても合格）
 - それ以外は「差し戻し」として次のラウンドへ進める
 - 差し戻し時、Developer には「REJECT の根拠を最優先で修正、改善提案は任意」と伝える
