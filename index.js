@@ -218,10 +218,15 @@ const TEST_REVIEWER_SYSTEM = `あなたはテストレビュアーAIです。Tes
 - 不合格: 先頭行「REJECT」。根拠項目のみ箇条書き（該当ファイル・要件番号・理由）
 - 判定は保留しない。`;
 
-const LOG_DIR = path.join(__dirname, "logs");
-const TMP_DIR = path.join(__dirname, ".loop-tmp");
-const OUTPUT_DIR = path.join(__dirname, "output"); // 最終成果物（deliverable）
-const RUNS_DIR = path.join(__dirname, "runs"); // ラウンドごとのスナップショット＋遷移サマリ
+// LOOP_ARTIFACT_ROOT を指定すると、生成物（logs/output/runs/.loop-tmp）を
+// その配下に隔離する（テスト・世代実験で本体ディレクトリを汚さないため）。
+const ARTIFACT_ROOT = process.env.LOOP_ARTIFACT_ROOT
+  ? path.resolve(process.env.LOOP_ARTIFACT_ROOT)
+  : __dirname;
+const LOG_DIR = path.join(ARTIFACT_ROOT, "logs");
+const TMP_DIR = path.join(ARTIFACT_ROOT, ".loop-tmp");
+const OUTPUT_DIR = path.join(ARTIFACT_ROOT, "output"); // 最終成果物（deliverable）
+const RUNS_DIR = path.join(ARTIFACT_ROOT, "runs"); // ラウンドごとのスナップショット＋遷移サマリ
 
 // api モードでのみ使用（cli モードなら未認証でも生成される）
 const apiClient = new Anthropic();

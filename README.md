@@ -22,6 +22,15 @@ Node.js v18以上が必要です（ESM / トップレベルawaitを使用）。
 npm install
 ```
 
+## テスト
+
+```bash
+npm test              # 凍結オラクル（test/）を実行。API 不要（オフラインモック）
+SLOW=1 npm test       # レート制限テスト等の遅いものも含める
+```
+
+`test/` は自己改修時の外部の歯止め。詳細は [test/README.md](./test/README.md)。
+
 **基本は `sdk`（Claude Agent SDK）を使う。** 開発・検証はすべて `sdk` モード前提で、
 `cli` / `api` は必要な場合のみのフォールバックです。モデルの呼び出し方は3通り、
 `LOOP_PROVIDER` で切り替えます。
@@ -137,6 +146,7 @@ Reviewer には元のタスク文（要件）も渡されるので、「バグ�
 | `TEST_FAIL_MODE` | `reject` | `reject`=テスト失敗で即REJECT / `review`=Code Reviewer に渡す |
 | `TEST_WRITER_MODEL` / `TEST_REVIEWER_MODEL` | `claude-sonnet-5` | 各エージェントのモデル |
 | `FROM_DIR` | （空）| 既存ファイルツリーを読み込んで改修対象にする（未指定ならゼロから新規作成）|
+| `LOOP_ARTIFACT_ROOT` | （空）| 生成物（logs/output/runs/.loop-tmp）の出力先を隔離する（テスト・世代実験用）|
 
 ```bash
 TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "タスク"

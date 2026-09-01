@@ -1,0 +1,2 @@
+# 承認された世代の受け入れテスト（test/REQUIREMENTS.md + *.test.js）を
+# gen-001/ gen-002/ ... として貯めていく。test/run.mjs が node --test で拾う。
