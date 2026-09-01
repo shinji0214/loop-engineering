@@ -7,6 +7,9 @@ output/
 runs/
 logs/
 
+# 自己改修実験の世代スナップショット（作業データ）
+gens/
+
 # OS / エディタ
 .DS_Store
 *.log

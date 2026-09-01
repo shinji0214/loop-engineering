@@ -164,6 +164,26 @@ TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "�
 Expressなどからそのまま `import { runLoop } from "./index.js"` して
 呼び出せます。
 
+## 自己改修実験（experiments/）
+
+このループに**自分自身（`index.js`）の改修**をさせ、世代を重ねて品質が保てるか観測する実験。
+
+```bash
+node experiments/selfimprove.mjs --generations=1
+```
+
+1世代 =
+1. `experiments/BACKLOG.md` の先頭の未完（`- [ ]`）項目を取る
+2. その世代の `index.js` に `FROM_DIR` で渡し、`TESTS=1` で改修させる
+3. 成果物＋生成された受け入れテストを `gens/gen-<N+1>/` に組み立て、テストを
+   `test/generations/gen-NNN/` に昇格
+4. `gens/gen-<N+1>/test/run.mjs`（凍結オラクル）を実行
+   - 全通過 → 採用、BACKLOG を `- [x]` に、次世代へ
+   - 失敗 → 破棄してログに残し停止
+
+`gens/` は `.gitignore` 済み（作業データ）。採用世代を本体に反映するかは人間が判断する。
+凍結オラクル `test/` は**手書き固定**で、これが外部の歯止め（[test/README.md](./test/README.md)）。
+
 ## 次にやること
 
 `STEPS.md` のSTEP 3（チャットUI化）に進み、このループをブラウザから

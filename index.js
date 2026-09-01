@@ -100,7 +100,9 @@ const TEST_REVIEWER_MODEL = process.env.TEST_REVIEWER_MODEL || "claude-sonnet-5"
 // （＝ゼロから作らせるのではなく既存コードの改修・自己編集実験に使う）。
 const FROM_DIR = process.env.FROM_DIR || "";
 // FROM_DIR がプロジェクトルート等を指しても安全なよう、走査から除外する名前
-const FROM_DIR_EXCLUDE = new Set(["node_modules", ".git", "output", "runs", "logs", ".loop-tmp"]);
+const FROM_DIR_EXCLUDE = new Set([
+  "node_modules", ".git", "output", "runs", "logs", ".loop-tmp", "experiments", "gens",
+]);
 
 const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
 与えられた要件を満たすコードを、動作する形で出力してください。
@@ -571,21 +573,33 @@ function renderFiles(fileMap) {
 
 /**
  * Developer の今回の出力を累積ファイル Map にマージする。
+ * isProtected(path) が真のパスは Developer が出力しても取り込まず無視する
+ * （凍結テスト等、既存のまま保持したいファイル）。
  * @param {Map<string,string>} fileMap - 破壊的に更新される
  * @param {string} code
- * @returns {{changed: string[], deleted: string[]}}
+ * @param {(path: string) => boolean} [isProtected]
+ * @returns {{changed: string[], deleted: string[], ignored: string[]}}
  */
-function mergeFiles(fileMap, code) {
+function mergeFiles(fileMap, code, isProtected) {
   const changed = [];
+  const ignored = [];
   for (const f of parseFiles(code)) {
+    if (isProtected && isProtected(f.path)) {
+      ignored.push(f.path);
+      continue;
+    }
     if (fileMap.get(f.path) !== f.content) changed.push(f.path);
     fileMap.set(f.path, f.content);
   }
   const deleted = [];
   for (const p of parseDeletes(code)) {
+    if (isProtected && isProtected(p)) {
+      ignored.push(p);
+      continue;
+    }
     if (fileMap.delete(p)) deleted.push(p);
   }
-  return { changed, deleted };
+  return { changed, deleted, ignored };
 }
 
 /** base の外に出ないよう相対パスを解決する。ダメなら例外。 */
@@ -1085,19 +1099,16 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
     code = await callAgent(DEVELOPER_SYSTEM, devHistory, DEVELOPER_MODEL, meter);
     devHistory.push({ role: "assistant", content: code });
 
-    // 今回の出力を累積状態にマージ（変更ファイルのみ / 削除指示を反映）
-    const { changed, deleted } = mergeFiles(currentFiles, code);
+    // 凍結テストがある場合、Developer が test/ 配下や凍結テストを出力しても取り込まない
+    // （既存の test/ ファイルは FROM_DIR 由来なら壊さず保持する）。
+    const isProtected = frozenTests.size
+      ? (p) => p === "test" || p.startsWith("test/") || frozenTests.has(p)
+      : undefined;
 
-    // テストは凍結済み。Developer が test/ を書き換えようとしても無視する。
-    if (frozenTests.size) {
-      for (const p of [...currentFiles.keys()]) {
-        if (p.startsWith("test/") || frozenTests.has(p)) {
-          currentFiles.delete(p);
-          const i = changed.indexOf(p);
-          if (i >= 0) changed.splice(i, 1);
-          console.warn(`[Warn] テストは凍結済みです。無視: ${p}`);
-        }
-      }
+    // 今回の出力を累積状態にマージ（変更ファイルのみ / 削除指示を反映）
+    const { changed, deleted, ignored } = mergeFiles(currentFiles, code, isProtected);
+    if (ignored.length) {
+      console.warn(`[Warn] テストは凍結済みです。Developer の出力を無視: ${ignored.join(", ")}`);
     }
 
     // このラウンド終了時点のスナップショットを runs/<id>/round-N/ に保存
