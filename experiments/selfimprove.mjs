@@ -121,12 +121,24 @@ function runGeneration(n) {
   console.log(`改善: ${item.text}\n`);
 
   const artifactRoot = fs.mkdtempSync(path.join(GENS, `run-${n}-`));
+
+  // FROM_DIR は index.js（+package.json）だけに絞る。
+  // 全16ファイルを毎エージェント呼び出しに乗せるとトークンが破綻するため。
+  // test/mocks 等は gen-<N> から直接コピーで引き継ぐ（下の組み立てステップ）。
+  const seedDir = path.join(artifactRoot, "seed");
+  fs.mkdirSync(seedDir, { recursive: true });
+  for (const f of ["index.js", "package.json"]) {
+    const s = path.join(base, f);
+    if (fs.existsSync(s)) fs.copyFileSync(s, path.join(seedDir, f));
+  }
+
   const env = {
     ...process.env,
-    FROM_DIR: base,
+    FROM_DIR: seedDir,
     TESTS: "1",
     LOOP_ARTIFACT_ROOT: artifactRoot,
-    MAX_ROUNDS: process.env.MAX_ROUNDS || "5",
+    MAX_ROUNDS: process.env.MAX_ROUNDS || "3",
+    TOKEN_BUDGET: process.env.TOKEN_BUDGET || "300000",
   };
 
   const r = sh(process.execPath, [path.join(base, "index.js"), item.text + TASK_GUIDANCE], {
@@ -151,10 +163,14 @@ function runGeneration(n) {
   const outDir = path.join(outRoot, sess);
   const testsDir = path.join(runsRoot, sess, "tests");
 
-  // gen-<N+1> を組み立て
+  // gen-<N+1> を組み立て: gen-<N> の全ファイルをコピー → ループが変更したファイルで上書き
   const cand = genDir(n + 1);
   fs.rmSync(cand, { recursive: true, force: true });
-  copyTree(outDir, cand);
+  copyTree(base, cand);
+  for (const e of fs.readdirSync(outDir, { withFileTypes: true })) {
+    if (e.isFile()) fs.copyFileSync(path.join(outDir, e.name), path.join(cand, e.name));
+    else copyTree(path.join(outDir, e.name), path.join(cand, e.name));
+  }
 
   // Test Writer の受け入れテストを test/generations/gen-<NNN>/ に昇格
   const promotedDir = path.join(cand, "test", "generations", `gen-${String(n + 1).padStart(3, "0")}`);

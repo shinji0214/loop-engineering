@@ -184,6 +184,12 @@ node experiments/selfimprove.mjs --generations=1
 `gens/` は `.gitignore` 済み（作業データ）。採用世代を本体に反映するかは人間が判断する。
 凍結オラクル `test/` は**手書き固定**で、これが外部の歯止め（[test/README.md](./test/README.md)）。
 
+> **コスト注意**: 1世代 ≒ 200〜400k トークン（Test Writer/Reviewer + Developer×3 +
+> Code Reviewer + オラクル）。FROM_DIR は `index.js` だけに絞って（`test/mocks` 等は
+> ドライバが直接コピーで引き継ぐ）入力を圧縮しているが、Developer が毎ラウンド
+> `index.js` 全体（~1300行）を再出力するのが主コスト。`MAX_ROUNDS=3` /
+> `TOKEN_BUDGET=300000` が既定（環境変数で調整可）。Pro プランでは数世代で週次枠を圧迫する。
+
 ## 次にやること
 
 `STEPS.md` のSTEP 3（チャットUI化）に進み、このループをブラウザから
