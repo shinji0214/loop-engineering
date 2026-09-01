@@ -4,6 +4,25 @@
 > `claude` のサブスク（Pro/Max）ログインをそのまま使うので Anthropic API キーは不要。
 > `LOOP_PROVIDER` で `cli`（`claude -p` サブプロセス）/ `api`（APIキー直叩き）にも切替可。
 
+> エージェントは最大4体（`TESTS=1` のとき）: Test Writer / Test Reviewer /
+> Developer / Code Reviewer。既定（`TESTS=0`）は Developer / Code Reviewer の2体。
+
+## Test Writer Agent（`TESTS=1` のとき）
+
+- **役割**: コード生成の前に、タスクと入出力例（アンカー）から受け入れテストを作る
+- **モデル**: `claude-sonnet-5`（`TEST_WRITER_MODEL`）
+- **出力**: `test/REQUIREMENTS.md`（検証可能な要件の番号付き列挙＋エントリパス）と
+  `test/acceptance.test.js`（`node:test`。各要件に最低1テスト、アンカーは逐語）
+- テスト不可なタスクは「テスト不可: 理由」を返す
+
+## Test Reviewer Agent（`TESTS=1` のとき）
+
+- **役割**: Test Writer の出力を、実装前に審査する（「テストのテスト」）
+- **モデル**: `claude-sonnet-5`（`TEST_REVIEWER_MODEL`）
+- **REJECT 条件**: 要件列挙が不忠実 / カバレッジ不足（テストの無い要件）/
+  アンカー不整合 / 実装詳細を過剰に assert / モック使用 / テストが壊れている
+- APPROVE で**テストを凍結**（`runs/<セッションID>/tests/`）。以降 Developer は変更不可
+
 ## Developer Agent
 
 - **役割**: ユーザーから与えられたタスクを満たすコードを実装する
@@ -29,7 +48,7 @@
   遷移サマリ（判定・変更ファイル・前回指摘への対応の表＋Reviewer 全文）を
   `runs/<セッションID>/SUMMARY.md` に生成（`SNAPSHOTS=0` で無効）。
 
-## Reviewer Agent
+## Code Reviewer Agent（旧 Reviewer）
 
 - **役割**: Developer Agentの出力をレビューし、合否判定を下す
 - **モデル**: `claude-sonnet-5`
@@ -65,13 +84,20 @@ Reviewer を呼ぶ前に、毎ラウンド機械チェックを通す:
 
 - `.json` → `JSON.parse` / `.js`/`.mjs`/`.cjs` → 子プロセスで動的 `import`（読み込み確認）
 - 構文エラー・モジュール解決エラー・ESM/CommonJS 不整合を検出
-- **失敗 → Reviewer を呼ばず即 REJECT**（`verdict: REJECT`、`checks` にエラー列挙）。エラー全文を次ラウンドの Developer へ
-- アプリ的な実行時例外は無視（挙動の検証は フェーズ3 のテスト実行で）
+- **失敗 → Code Reviewer を呼ばず即 REJECT**（`verdict: REJECT`、`checks` にエラー列挙）。エラー全文を次ラウンドの Developer へ
+- アプリ的な実行時例外は無視（挙動の検証はテスト実行で）
 - `CHECKS=0` で無効
+
+## 受け入れテスト実行（STEP 4 フェーズ3 / `TESTS=1` のとき）
+
+- 決定的チェック通過後、`node --test`（凍結テスト＋現在のコード）を子プロセスで実行
+- **失敗 → Code Reviewer を呼ばず即 REJECT**（`TEST_FAIL_MODE=review` で Reviewer に委任）。失敗ログを Developer へ
+- 全通過 → Code Reviewer にテスト結果も渡す
 
 ## 完了基準（Acceptance Criteria）
 
-- 決定的チェックを通過し、**かつ** Reviewer Agent の応答が `APPROVE` で始まる場合のみ「合格」
+- 決定的チェックを通過、**かつ**（`TESTS=1` なら）受け入れテスト全通過、
+  **かつ** Code Reviewer の応答が `APPROVE` で始まる場合のみ「合格」
   （APPROVE の後に「改善提案（対応任意）」が続いても合格）
 - それ以外は「差し戻し」として次のラウンドへ進める
 - 差し戻し時、Developer には「REJECT の根拠を最優先で修正、改善提案は任意」と伝える

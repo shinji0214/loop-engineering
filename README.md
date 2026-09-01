@@ -86,9 +86,23 @@ Reviewer には元のタスク文（要件）も渡されるので、「バグ�
 - `.json` は `JSON.parse`、`.js` / `.mjs` / `.cjs` は動的 `import` で**読み込み確認**
 - 構文エラー / モジュール解決エラー / **ESM・CommonJS の不整合** を検出
 - 失敗したら **Reviewer を呼ばずに即 REJECT**（トークン節約）、エラー全文を次ラウンドの Developer に渡す
-- アプリ的な実行時例外はフェーズ1では無視（テスト実行はフェーズ3で）
+- アプリ的な実行時例外はここでは無視（挙動の検証はテスト実行で）
 
 `CHECKS=0` で無効化。
+
+### 受け入れテスト（STEP 4 フェーズ2-3 / 既定 OFF・`TESTS=1` で有効）
+
+コード生成の**前**に、テストを確定してから実装ループを回します:
+
+1. **Test Writer** … タスク文と入出力例（アンカー）から「検証可能な要件」を列挙 ＋ `node:test` の
+   受け入れテスト（`test/acceptance.test.js`）を生成。アンカーは逐語でテスト化
+2. **Test Reviewer** … 要件列挙の忠実性 / 全要件にテストがあるか / アンカー整合 / 過剰モックを審査
+3. APPROVE で**テストを凍結**（`runs/<セッションID>/tests/`）。以降 Developer はテストを変更できない
+4. 実装ループの毎ラウンド、決定的チェック通過後に `node --test` を実行
+   - 失敗 → **Code Reviewer を呼ばず即 REJECT**（`TEST_FAIL_MODE=review` で Reviewer に委ねる）
+   - 全通過 → Code Reviewer にテスト結果も渡してレビュー
+
+テスト不可なタスク（主観的・数値化不能）は Test Writer が「テスト不可」を返し、フェーズ1＋Reviewer のみで進みます。
 
 ### トークンの安全弁（環境変数で調整）
 
@@ -106,6 +120,11 @@ Reviewer には元のタスク文（要件）も渡されるので、「バグ�
 | `SNAPSHOTS` | `1` | `0` で `runs/<セッションID>/`（ラウンドごとのスナップショット＋`SUMMARY.md`）を作らない |
 | `CHECKS` | `1` | `0` で決定的チェック（構文・読み込み）を無効化 |
 | `CHECK_TIMEOUT_MS` | `15000` | チェック子プロセスのタイムアウト |
+| `TESTS` | `0` | `1` で受け入れテスト（Test Writer/Reviewer ＋ `node --test`）を有効化 |
+| `TEST_MAX_ROUNDS` | `2` | テスト確定フェーズの最大ラウンド |
+| `TEST_TIMEOUT_MS` | `30000` | `node --test` のタイムアウト |
+| `TEST_FAIL_MODE` | `reject` | `reject`=テスト失敗で即REJECT / `review`=Code Reviewer に渡す |
+| `TEST_WRITER_MODEL` / `TEST_REVIEWER_MODEL` | `claude-sonnet-5` | 各エージェントのモデル |
 
 ```bash
 TOKEN_BUDGET=200000 TOKENS_PER_MINUTE=60000 MAX_BUDGET_USD=0.5 node index.js "タスク"

@@ -85,6 +85,17 @@ const SNAPSHOTS = !/^(0|false|no|off)$/i.test(process.env.SNAPSHOTS ?? "");
 const CHECKS = !/^(0|false|no|off)$/i.test(process.env.CHECKS ?? "");
 const CHECK_TIMEOUT_MS = numFromEnv("CHECK_TIMEOUT_MS", 15_000);
 
+// TESTS=1 で有効化（STEP 4 フェーズ2-3、実験中のため既定 OFF）。
+// コード生成前に Test Writer → Test Reviewer で受け入れテストを確定・凍結し、
+// 実装ループの毎ラウンド `node --test` を実行。失敗したら Code Reviewer を呼ばず即 REJECT。
+const TESTS = /^(1|true|yes|on)$/i.test(process.env.TESTS || "");
+const TEST_MAX_ROUNDS = numFromEnv("TEST_MAX_ROUNDS", 2); // テスト確定フェーズの上限
+const TEST_TIMEOUT_MS = numFromEnv("TEST_TIMEOUT_MS", 30_000);
+// テスト失敗時の挙動: reject=即REJECT（既定）/ review=Code Reviewer に結果を渡して判断させる
+const TEST_FAIL_MODE = (process.env.TEST_FAIL_MODE || "reject").toLowerCase();
+const TEST_WRITER_MODEL = process.env.TEST_WRITER_MODEL || "claude-sonnet-5";
+const TEST_REVIEWER_MODEL = process.env.TEST_REVIEWER_MODEL || "claude-sonnet-5";
+
 const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
 与えられた要件を満たすコードを、動作する形で出力してください。
 レビュー指摘を受け取った場合は、指摘内容を反映して修正版を出力してください。
@@ -107,7 +118,10 @@ const DEVELOPER_SYSTEM = `あなたは実装担当のエンジニアAIです。
   \`\`\`delete
   src/old.js
   \`\`\`
-- パスに .. や絶対パスは使わない。`;
+- パスに .. や絶対パスは使わない。
+- test/ 配下に受け入れテストが与えられている場合、それを全て通すこと。
+  **テストファイル（test/ 配下）は出力・変更しない**（凍結済み）。
+  テストがタスクと矛盾していると思ったら、コードは出さずその旨だけを述べる。`;
 
 const REVIEWER_SYSTEM = `あなたはコードレビュアーAIです。重大な欠陥には厳格に、
 些細な改善要望には寛容に判定します。
@@ -139,7 +153,62 @@ REJECT にできるのは、次のいずれかに該当する場合だけです:
   箇条書きで、該当ファイル・箇所・理由を添えて書く。任意で最後に
   「改善提案（対応任意）:」を分けて書いてよい。
 - 憶測で判定しない。指摘には必ず根拠（該当箇所）を添える。
-- 要件のうち未達の項目があれば明示する。`;
+- 要件のうち未達の項目があれば明示する。
+- （テスト結果が渡された場合）全テストは既に通過している前提。
+  「テストは通るがタスク要件を満たしていない」「テストの穴を突いた実装になっている」
+  を重点的に見る。テスト自体の不備は改善提案に回す（テストは凍結済みのため）。`;
+
+const TEST_WRITER_SYSTEM = `あなたはテスト作成担当のエンジニアAIです。
+タスク（要件）と、その中の入出力例（アンカー）を受け取り、受け入れテストを作ります。
+
+出力は次を **この順で**、すべてコードブロックとして:
+
+1. \`\`\`test/REQUIREMENTS.md
+   タスクから抽出した「検証可能な要件」を番号付きで列挙する（1行1要件）。
+   タスクに書かれていない要件を作らない。曖昧な表現は具体化して書く。
+   テストが import するエントリのパスも1行書く（例: 「エントリ: ../src/index.js」）。
+   \`\`\`
+
+2. \`\`\`test/acceptance.test.js
+   Node.js 標準の node:test / node:assert だけで書く（外部依存禁止）。
+   - REQUIREMENTS.md の各番号に最低1つ、対応する test(...) を書く（test名に「要件N:」を付ける）
+   - タスク中の入出力例（アンカー）は**逐語で**テストケースにする
+   - 実装は相対 import で読む（例: import x from '../src/index.js'）
+   - 仕様に書かれていない実装の詳細を assert しない（公開挙動だけを検証）
+   - モックは使わない。標準ライブラリで完結するタスク前提で、実物を呼ぶ
+   \`\`\`
+
+テストが書けないタスク（数値化できない/主観的）の場合は、
+\`\`\`test/REQUIREMENTS.md
+テスト不可: <理由>
+\`\`\`
+だけを出力する。
+
+修正指示を受けたら、指摘に沿って**変更するファイルだけ**再出力する。`;
+
+const TEST_REVIEWER_SYSTEM = `あなたはテストレビュアーAIです。Test Writer の出力を、コード実装前にチェックします。
+
+入力: 「タスク（要件）」「アンカー（入出力例）」「Test Writer の出力（REQUIREMENTS.md とテスト）」。
+
+## REJECT にできるのは次のいずれか
+
+- 要件列挙がタスクに対して不忠実（勝手に足した / 明記の要件が抜けている / 誤読）
+- 要件のうちテストが1つも無いものがある（カバレッジ不足）
+- アンカー（入出力例）がテストに逐語で入っていない、または矛盾している
+- 仕様に無い実装の詳細を assert している（実装を過剰に縛るテスト）
+- モックや外部依存を使っている（標準ライブラリで完結するはずのタスクで）
+- テスト自体が構文的に壊れている / import 先が明らかに解決しない
+
+## REJECT にしない（改善提案に回す）
+
+- テストをもっと増やせる、エッジケースを足せる（最低カバレッジを満たしていれば可）
+- 命名・構成・スタイル
+
+## 出力フォーマット
+
+- 合格: 先頭行「APPROVE」。任意で「改善提案（対応任意）:」
+- 不合格: 先頭行「REJECT」。根拠項目のみ箇条書き（該当ファイル・要件番号・理由）
+- 判定は保留しない。`;
 
 const LOG_DIR = path.join(__dirname, "logs");
 const TMP_DIR = path.join(__dirname, ".loop-tmp");
@@ -645,6 +714,121 @@ export async function runChecks(sessionId, roundNum, fileMap) {
   };
 }
 
+// --- STEP 4 フェーズ2-3: 受け入れテスト（Test Writer / Test Reviewer / node --test） ---
+
+/** タスク文からアンカー（入出力例らしき行）を抜き出して整形。 */
+function extractAnchors(task) {
+  const lines = task
+    .split(/\n|。/)
+    .map((s) => s.trim())
+    .filter((s) => /例|=>|->|→|とき|なら|返す|出力/.test(s) && s.length > 3);
+  return lines.length ? lines.map((l) => `- ${l}`).join("\n") : "(タスク本文から自動抽出できず。本文全体をアンカー候補とする)";
+}
+
+/**
+ * コード生成前に受け入れテストを確定・凍結する（フェーズ2）。
+ * @returns {Promise<{testFiles: Map<string,string>, requirements: string, status: "approved"|"unreviewed"|"untestable"}>}
+ */
+async function establishTests(task, meter) {
+  const anchors = extractAnchors(task);
+  const twHistory = [
+    {
+      role: "user",
+      content: `# タスク（要件）\n${task}\n\n# アンカー（入出力例の候補）\n${anchors}`,
+    },
+  ];
+  const testFiles = new Map();
+  let requirements = "";
+
+  for (let r = 1; r <= TEST_MAX_ROUNDS; r++) {
+    console.log(`\n--- テスト確定 ${r}/${TEST_MAX_ROUNDS} ---`);
+    const out = await callAgent(TEST_WRITER_SYSTEM, twHistory, TEST_WRITER_MODEL, meter);
+    twHistory.push({ role: "assistant", content: out });
+    mergeFiles(testFiles, out);
+
+    const reqFile = testFiles.get("test/REQUIREMENTS.md") || "";
+    requirements = reqFile;
+    if (/^テスト不可[:：]/m.test(reqFile)) {
+      console.log(`[TestWriter] ${reqFile.split("\n")[0]}`);
+      return { testFiles: new Map(), requirements: reqFile, status: "untestable" };
+    }
+    const testCount = [...testFiles.keys()].filter((p) => /\.test\.[cm]?js$/.test(p)).length;
+    console.log(`[TestWriter] ${testCount}個のテストファイル / 要件 ${reqFile.split("\n").filter((l) => /^\s*\d/.test(l)).length} 件`);
+
+    const review = await callAgent(
+      TEST_REVIEWER_SYSTEM,
+      [
+        {
+          role: "user",
+          content:
+            `# タスク（要件）\n${task}\n\n# アンカー\n${anchors}\n\n` +
+            `# Test Writer の出力\n${renderFiles(testFiles)}`,
+        },
+      ],
+      TEST_REVIEWER_MODEL,
+      meter
+    );
+    const ok = review.trim().startsWith("APPROVE");
+    console.log(`[TestReviewer]\n${review}\n`);
+    if (ok) return { testFiles, requirements, status: "approved" };
+
+    twHistory.push({
+      role: "user",
+      content: `テストレビュー結果:\n${review}\n\n現在のテスト:\n${renderFiles(testFiles)}\n\nREJECT の根拠を直し、変更するファイルだけ再出力してください。`,
+    });
+  }
+  console.warn(`[Warn] テストが ${TEST_MAX_ROUNDS} ラウンドで APPROVE されず。暫定テストで続行します`);
+  return { testFiles, requirements, status: "unreviewed" };
+}
+
+/**
+ * コード + 凍結テストを一時ディレクトリに展開し `node --test` を実行。
+ * @returns {Promise<{ok: boolean, summary: string, output: string}>}
+ */
+async function runTests(sessionId, roundNum, codeMap, testMap) {
+  const base = path.join(TMP_DIR, `tests-${sessionId}`);
+  const dir = path.join(base, `round-${roundNum}`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  writeFileTree(dir, [...filesFromMap(codeMap), ...filesFromMap(testMap)]);
+
+  const res = await new Promise((resolve) => {
+    const child = spawn(process.execPath, ["--test", "test/"], {
+      cwd: dir,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: TEST_TIMEOUT_MS,
+    });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => resolve({ err: `spawn error: ${e.message}`, codeExit: -1 }));
+    child.on("close", (codeExit, signal) => resolve({ out, err, codeExit, signal }));
+  });
+  try {
+    fs.rmSync(base, { recursive: true, force: true });
+  } catch {
+    /* noop */
+  }
+
+  const raw = `${res.out || ""}\n${res.err || ""}`.trim();
+  if (res.signal) {
+    return { ok: false, summary: `テストが ${Math.round(TEST_TIMEOUT_MS / 1000)} 秒でタイムアウト`, output: raw.slice(0, 2000) };
+  }
+  const pass = Number((raw.match(/^# pass (\d+)/m) || [])[1] || 0);
+  const fail = Number((raw.match(/^# fail (\d+)/m) || [])[1] || 0);
+  const ok = res.codeExit === 0 && fail === 0 && pass > 0;
+  const summary = pass + fail > 0 ? `pass ${pass} / fail ${fail}` : `テスト実行エラー（exit ${res.codeExit}）`;
+  // 失敗時は詳細（not ok の行と assert 出力）を優先的に残す
+  const detail = ok
+    ? ""
+    : raw
+        .split("\n")
+        .filter((l) => /^not ok|^\s*(expected|actual|message|error):|AssertionError|Error:|要件\d/.test(l))
+        .slice(0, 40)
+        .join("\n");
+  return { ok, summary, output: (detail || raw).slice(0, 2500) };
+}
+
 /**
  * 遷移サマリ Markdown を組み立てる。
  * @param {{
@@ -665,6 +849,9 @@ function buildSummary(d) {
   L.push(`- ラウンド: ${d.rounds.length} / ${d.maxRounds}`);
   L.push(`- 消費トークン: ${d.usage.total}（入力 ${d.usage.input} / 出力 ${d.usage.output}）`);
   L.push(`- 最終ファイル: ${d.finalPaths.join(", ") || "(なし)"}`);
+  if (d.tests && d.tests.status !== "off") {
+    L.push(`- 受け入れテスト: ${d.tests.status}（${d.tests.files.join(", ") || "なし"}）`);
+  }
   L.push("");
   L.push("## 遷移", "");
   L.push("| R | 判定 | 変更 | 削除 | 前ラウンド指摘への対応 |");
@@ -721,7 +908,6 @@ function buildSummary(d) {
  */
 export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   const sessionId = new Date().toISOString().replace(/[:.]/g, "-");
-  const devHistory = [{ role: "user", content: task }];
   const meter = new TokenMeter({
     budget: TOKEN_BUDGET,
     ratePerMinute: TOKENS_PER_MINUTE,
@@ -729,6 +915,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   let code = ""; // 直近ラウンドの Developer 生出力（ログ・フォールバック表示用）
   const currentFiles = new Map(); // 累積プロジェクト状態: 相対パス -> 内容
   let lastReview = null; // 前ラウンドの Reviewer 出力（回帰ガード用）
+  let lastRejectWasAuto = false; // 前ラウンドが決定的ゲート（チェック/テスト）による自動REJECTか
   /** @type {{round:number, verdict:string, changed:string[], deleted:string[], review:string}[]} */
   const rounds = []; // SUMMARY.md 用の遷移記録
   const runsSessionDir = path.join(RUNS_DIR, sessionId);
@@ -736,10 +923,46 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
   console.log(
     `[Config] provider=${PROVIDER} models=${modelAlias(DEVELOPER_MODEL)}/${modelAlias(REVIEWER_MODEL)} ` +
       `max_rounds=${maxRounds} token_budget=${TOKEN_BUDGET || "無制限"} ` +
-      `rate=${TOKENS_PER_MINUTE || "無制限"}/分 checks=${CHECKS ? "on" : "off"}` +
+      `rate=${TOKENS_PER_MINUTE || "無制限"}/分 checks=${CHECKS ? "on" : "off"} tests=${TESTS ? "on" : "off"}` +
       (PROVIDER === "api" ? ` max_output_tokens=${MAX_OUTPUT_TOKENS}` : "") +
       (PROVIDER === "sdk" && MAX_BUDGET_USD ? ` max_budget_usd=${MAX_BUDGET_USD}` : "")
   );
+
+  // --- フェーズ2: コード生成前に受け入れテストを確定・凍結する ---
+  let frozenTests = new Map();
+  let testStatus = "off";
+  if (TESTS) {
+    console.log(`\n=== テスト確定フェーズ ===`);
+    const est = await establishTests(task, meter);
+    frozenTests = est.testFiles;
+    testStatus = est.status;
+    if (frozenTests.size) {
+      try {
+        writeFileTree(path.join(runsSessionDir, "tests"), filesFromMap(frozenTests));
+        console.log(`[Tests] 凍結: ${[...frozenTests.keys()].join(", ")}`);
+      } catch (e) {
+        console.warn(`[Warn] テスト凍結の書き出しに失敗: ${e.message}`);
+      }
+    } else {
+      console.log(`[Tests] テスト無しで続行（status=${testStatus}）`);
+    }
+    saveLog(sessionId, {
+      event: "tests_established",
+      status: testStatus,
+      files: [...frozenTests.keys()],
+      requirements: est.requirements,
+      usage: meter.summary(),
+    });
+  }
+
+  const devHistory = [
+    {
+      role: "user",
+      content: frozenTests.size
+        ? `${task}\n\n# 与えられた受け入れテスト（test/ 配下・変更禁止・全て通すこと）\n${renderFiles(frozenTests)}`
+        : task,
+    },
+  ];
 
   /** 終了時の共通処理: 成果物と遷移サマリを書き出して結果オブジェクトを返す。 */
   const finish = (status) => {
@@ -768,6 +991,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
             maxRounds,
             usage: meter.summary(),
             finalPaths: files.map((f) => f.path),
+            tests: { status: testStatus, files: [...frozenTests.keys()] },
             rounds,
           }),
           "utf-8"
@@ -785,9 +1009,18 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
       files: files.map((f) => f.path),
       output_dir: outputDir,
       runs_dir: runsDir,
+      tests: { status: testStatus, files: [...frozenTests.keys()] },
       usage: meter.summary(),
     });
-    return { code, files, outputDir, runsDir, status, usage: meter.summary() };
+    return {
+      code,
+      files,
+      outputDir,
+      runsDir,
+      status,
+      tests: { status: testStatus, files: [...frozenTests.keys()] },
+      usage: meter.summary(),
+    };
   };
 
   for (let roundNum = 1; roundNum <= maxRounds; roundNum++) {
@@ -802,6 +1035,18 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
     // 今回の出力を累積状態にマージ（変更ファイルのみ / 削除指示を反映）
     const { changed, deleted } = mergeFiles(currentFiles, code);
 
+    // テストは凍結済み。Developer が test/ を書き換えようとしても無視する。
+    if (frozenTests.size) {
+      for (const p of [...currentFiles.keys()]) {
+        if (p.startsWith("test/") || frozenTests.has(p)) {
+          currentFiles.delete(p);
+          const i = changed.indexOf(p);
+          if (i >= 0) changed.splice(i, 1);
+          console.warn(`[Warn] テストは凍結済みです。無視: ${p}`);
+        }
+      }
+    }
+
     // このラウンド終了時点のスナップショットを runs/<id>/round-N/ に保存
     if (SNAPSHOTS && currentFiles.size) {
       try {
@@ -811,8 +1056,9 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
       }
     }
 
-    // 回帰ガード: 前回レビューで名前が出ていないファイルが変更されたら警告
-    if (roundNum > 1 && lastReview) {
+    // 回帰ガード: 前回レビューで名前が出ていないファイルが変更されたら警告。
+    // 前回が決定的ゲートの自動REJECT（チェック/テスト失敗）なら「直せ」の意なのでスキップ。
+    if (roundNum > 1 && lastReview && !lastRejectWasAuto) {
       const unflagged = changed.filter((p) => !lastReview.includes(p));
       if (unflagged.length) {
         console.warn(`[Warn] レビュー指摘に無いファイルが変更されました: ${unflagged.join(", ")}`);
@@ -844,39 +1090,70 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
       });
     };
 
+    /** LLM を呼ばずに REJECT を確定させる（決定的ゲート用）。 */
+    const autoReject = (reviewText, logExtra, feedbackOpts) => {
+      lastReview = reviewText;
+      lastRejectWasAuto = true;
+      rounds.push({ round: roundNum, verdict: "REJECT", changed, deleted, review: reviewText });
+      saveLog(sessionId, {
+        round: roundNum,
+        developer_output: code,
+        changed_files: changed,
+        deleted_files: deleted,
+        reviewer_output: reviewText,
+        verdict: "REJECT",
+        usage: meter.summary(),
+        ...logExtra,
+      });
+      console.log(
+        `[Usage] 累計 ${meter.total} トークン（入力 ${meter.totalInput} / 出力 ${meter.totalOutput}）`
+      );
+      pushRejectFeedback(reviewText, feedbackOpts);
+    };
+
     // --- 決定的チェック（フェーズ1）: 失敗なら Reviewer を呼ばず即 REJECT ---
     if (CHECKS && currentFiles.size) {
       const { ok, problems } = await runChecks(sessionId, roundNum, currentFiles);
       if (!ok) {
-        const autoReview =
-          "REJECT\n決定的チェック（構文・読み込み）で失敗:\n" +
-          problems.map((p) => `- ${p}`).join("\n");
         console.log(`[Checks] NG\n${problems.map((p) => `  - ${p}`).join("\n")}\n`);
-        lastReview = autoReview;
-        rounds.push({ round: roundNum, verdict: "REJECT", changed, deleted, review: autoReview });
-        saveLog(sessionId, {
-          round: roundNum,
-          developer_output: code,
-          changed_files: changed,
-          deleted_files: deleted,
-          checks: problems,
-          reviewer_output: autoReview,
-          verdict: "REJECT",
-          usage: meter.summary(),
-        });
-        console.log(
-          `[Usage] 累計 ${meter.total} トークン（入力 ${meter.totalInput} / 出力 ${meter.totalOutput}）`
+        autoReject(
+          "REJECT\n決定的チェック（構文・読み込み）で失敗:\n" + problems.map((p) => `- ${p}`).join("\n"),
+          { checks: problems },
+          {
+            label: "自動チェック結果",
+            instruction:
+              "まず全ファイルがエラーなく読み込める状態にしてください（構文エラー・" +
+              "モジュール解決エラー・ESM/CommonJS の不整合など）。**変更するファイルだけ**出力してください。",
+          }
         );
         if (reportBudget(meter)) return finish("budget_exceeded");
-        pushRejectFeedback(autoReview, {
-          label: "自動チェック結果",
-          instruction:
-            "まず全ファイルがエラーなく読み込める状態にしてください（構文エラー・" +
-            "モジュール解決エラー・ESM/CommonJS の不整合など）。**変更するファイルだけ**出力してください。",
-        });
         continue; // Reviewer を呼ばず次ラウンドへ
       }
       console.log(`[Checks] OK`);
+    }
+
+    // --- 受け入れテスト（フェーズ3）: node --test ---
+    let testEvidence = "";
+    if (frozenTests.size && currentFiles.size) {
+      const t = await runTests(sessionId, roundNum, currentFiles, frozenTests);
+      console.log(`[Tests] ${t.summary}`);
+      if (!t.ok && TEST_FAIL_MODE === "reject") {
+        autoReject(
+          `REJECT\n受け入れテストが失敗（${t.summary}）:\n\n${t.output}`,
+          { tests: t.summary, test_output: t.output },
+          {
+            label: "テスト結果",
+            instruction:
+              "失敗したテストを通してください。テストファイル（test/ 配下）は変更しません。" +
+              "**変更するファイルだけ**出力してください。",
+          }
+        );
+        if (reportBudget(meter)) return finish("budget_exceeded");
+        continue; // Code Reviewer を呼ばず次ラウンドへ
+      }
+      testEvidence = t.ok
+        ? `\n\n# 受け入れテスト結果\n全通過（${t.summary}）`
+        : `\n\n# 受け入れテスト結果（失敗あり）\n${t.summary}\n\`\`\`\n${t.output}\n\`\`\``;
     }
 
     // Reviewer には累積したプロジェクト全体を見せる（差分だけ見せない）
@@ -886,7 +1163,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
       [
         {
           role: "user",
-          content: `# 元のタスク（要件）\n${task}\n\n# 現在のプロジェクト全体\n${projectView}`,
+          content: `# 元のタスク（要件）\n${task}\n\n# 現在のプロジェクト全体\n${projectView}${testEvidence}`,
         },
       ],
       REVIEWER_MODEL,
@@ -894,6 +1171,7 @@ export async function runLoop(task, maxRounds = MAX_ROUNDS) {
     );
     console.log(`[Reviewer]\n${review}\n`);
     lastReview = review;
+    lastRejectWasAuto = false;
 
     const verdict = review.trim().startsWith("APPROVE") ? "APPROVE" : "REJECT";
     rounds.push({ round: roundNum, verdict, changed, deleted, review });
@@ -955,11 +1233,14 @@ async function main() {
     process.exit(1);
   }
 
-  const { code, files, outputDir, runsDir, status, usage } = await runLoop(task);
+  const { code, files, outputDir, runsDir, status, tests, usage } = await runLoop(task);
 
   console.log("\n" + "=".repeat(50));
   console.log(`最終ステータス: ${status}`);
   console.log(`消費トークン: ${usage.total}（入力 ${usage.input} / 出力 ${usage.output}）`);
+  if (tests && tests.status !== "off") {
+    console.log(`受け入れテスト: ${tests.status}（${tests.files.join(", ") || "なし"}）`);
+  }
   if (runsDir) console.log(`遷移サマリ: ${path.join(runsDir, "SUMMARY.md")}`);
   if (outputDir) {
     console.log(`成果物: ${outputDir}`);
